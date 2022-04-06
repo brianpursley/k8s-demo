@@ -1,0 +1,171 @@
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: k8s-demo
+data:
+  POSTGRES_DB: k8sdemo
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: k8s-demo
+data:
+  POSTGRES_USER: $BASE64_POSTGRES_USER
+  POSTGRES_PASSWORD: $BASE64_POSTGRES_PASSWORD
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: k8sdemo-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: 192.168.200.11 # NFS Server IP address
+    path: /mnt/nfs_share/k8sdemo
+  mountOptions:
+    - nfsvers=4.2
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k8sdemo-pvc
+  namespace: k8s-demo
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: k8sdemo-pv
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: k8s-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - configMapRef:
+                name: postgres-config
+            - secretRef:
+                name: postgres-secret
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: data
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: k8sdemo-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: k8s-demo
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    app: postgres
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: k8s-demo
+data:
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-service:5432/k8sdemo
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-secret
+  namespace: k8s-demo
+data:
+  SPRING_DATASOURCE_USERNAME: $BASE64_POSTGRES_USER
+  SPRING_DATASOURCE_PASSWORD: $BASE64_POSTGRES_PASSWORD
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: k8s-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/brianpursley/k8sdemo-api:$API_VERSION
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: api-config
+            - secretRef:
+                name: api-secret
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      imagePullSecrets:
+        - name: ghcr-registry
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+  namespace: k8s-demo
+spec:
+  type: NodePort
+  ports:
+    - port: 8080
+      nodePort: 30080
+  selector:
+    app: api
